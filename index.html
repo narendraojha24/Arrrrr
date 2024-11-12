@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interactive WebXR with Blender Model</title>
+
+  <!-- three.js -->
+  <script src="https://unpkg.com/three@0.126.0/build/three.js"></script>
+  <script src="https://unpkg.com/three@0.126.0/examples/js/loaders/GLTFLoader.js"></script>
+</head>
+<body>
+
+<button id="startButton">Start WebXR</button>
+
+<script>
+let session = null;
+let referenceSpace = null;
+let renderer = null;
+let camera = null;
+let scene = null;
+let gl = null;
+let model = null;
+let hitTestSource = null;
+let hitTestSourceRequested = false;
+let planeMesh = null;
+
+document.getElementById('startButton').addEventListener('click', () => {
+  activateXR().catch(err => {
+    console.error("Error activating XR:", err);
+    alert("Could not start AR session: " + err.message);
+  });
+});
+
+async function activateXR() {
+  if (!navigator.xr) {
+    console.error("WebXR not supported on this browser.");
+    alert("WebXR not supported on this browser.");
+    return;
+  }
+
+  try {
+    const canvas = document.createElement("canvas");
+    document.body.appendChild(canvas);
+    gl = canvas.getContext("webgl", { xrCompatible: true });
+
+    renderer = new THREE.WebGLRenderer({
+      alpha: true,
+      preserveDrawingBuffer: true,
+      canvas: canvas,
+      context: gl
+    });
+    renderer.autoClear = false;
+
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera();
+    camera.matrixAutoUpdate = false;
+
+    // Load the Blender model using GLTFLoader.
+    const loader = new THREE.GLTFLoader();
+    loader.load('Bar stool.glb', (gltf) => {
+      model = gltf.scene;
+      model.position.set(0, -0.5, -2);
+      model.scale.set(0.5, 0.5, 0.5);
+      scene.add(model);
+    }, undefined, (error) => {
+      console.error("Error loading the model:", error);
+    });
+
+    // Create a visible plane for placement.
+    const planeGeometry = new THREE.PlaneGeometry(1, 1);
+    const planeMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, opacity: 0.5, transparent: true });
+    planeMesh = new THREE.Mesh(planeGeometry, planeMaterial);
+    planeMesh.visible = false;
+    scene.add(planeMesh);
+
+    session = await navigator.xr.requestSession("immersive-ar", { requiredFeatures: ["hit-test"] });
+    session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+    referenceSpace = await session.requestReferenceSpace("local");
+    hitTestSourceRequested = false;
+
+    session.requestAnimationFrame(onXRFrame);
+    setupControls();
+
+  } catch (err) {
+    console.error("Error during XR session setup:", err);
+    throw err;
+  }
+}
+
+function onXRFrame(time, frame) {
+  session.requestAnimationFrame(onXRFrame);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
+
+  const pose = frame.getViewerPose(referenceSpace);
+  if (pose) {
+    const view = pose.views[0];
+    const viewport = session.renderState.baseLayer.getViewport(view);
+    renderer.setSize(viewport.width, viewport.height);
+
+    camera.matrix.fromArray(view.transform.matrix);
+    camera.projectionMatrix.fromArray(view.projectionMatrix);
+    camera.updateMatrixWorld(true);
+
+    // Request a hit test source if not requested already
+    if (!hitTestSourceRequested) {
+      session.requestHitTestSource({ space: referenceSpace }).then(source => {
+        hitTestSource = source;
+      });
+      hitTestSourceRequested = true;
+    }
+
+    // Perform hit testing to detect planes
+    if (hitTestSource) {
+      const hitTestResults = frame.getHitTestResults(hitTestSource);
+      if (hitTestResults.length > 0) {
+        const hit = hitTestResults[0];
+        const hitMatrix = new THREE.Matrix4().fromArray(hit.getPose(referenceSpace).transform.matrix);
+
+        // Place the plane mesh at the hit location
+        planeMesh.visible = true;
+        planeMesh.position.setFromMatrixPosition(hitMatrix);
+        planeMesh.rotation.setFromRotationMatrix(hitMatrix);
+
+        // Place the model on the detected plane
+        model.position.setFromMatrixPosition(hitMatrix);
+      } else {
+        planeMesh.visible = false;
+      }
+    }
+
+    renderer.render(scene, camera);
+  }
+}
+
+function setupControls() {
+  let initialDistance = null;
+  let initialScale = model ? model.scale.x : 1;
+  let initialRotation = model ? model.rotation.y : 0;
+
+  window.addEventListener("touchmove", (event) => {
+    if (model) {
+      if (event.touches.length === 2) {
+        // Scale model
+        const distance = getTouchDistance(event);
+        if (initialDistance == null) initialDistance = distance;
+        const scaleFactor = distance / initialDistance;
+        model.scale.set(initialScale * scaleFactor, initialScale * scaleFactor, initialScale * scaleFactor);
+      } else if (event.touches.length === 1) {
+        // Rotate model
+        const deltaX = event.touches[0].movementX || 0;
+        model.rotation.y = initialRotation + deltaX * 0.01;
+      }
+    }
+  });
+
+  window.addEventListener("touchend", (event) => {
+    if (model) {
+      initialScale = model.scale.x;
+      initialRotation = model.rotation.y;
+      initialDistance = null;
+    }
+  });
+}
+
+function getTouchDistance(event) {
+  const [touch1, touch2] = event.touches;
+  const dx = touch1.pageX - touch2.pageX;
+  const dy = touch1.pageY - touch2.pageY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+</script>
+
+</body>
+</html>
